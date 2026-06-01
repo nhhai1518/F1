@@ -1,0 +1,8 @@
+{
+  "name": "Bao cao Giao duc (1)",
+  "description": "Ứng dụng web nhập liệu báo cáo giáo dục kết nối với Google Sheets qua Google Apps Script",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
