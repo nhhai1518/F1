@@ -14,9 +14,19 @@ import {
   AlertCircle, 
   BookOpen, 
   ChevronRight,
-  Info
+  Info,
+  FileSpreadsheet,
+  LogIn,
+  LogOut,
+  Shield,
+  Lock,
+  Mail
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
+import * as XLSX from "xlsx";
+import { db } from "./firebase";
+import { collection, addDoc, onSnapshot, query, orderBy, deleteDoc, doc, serverTimestamp } from "firebase/firestore";
+
 
 // Structure definition for Schools database (Tab DM_TRUONG)
 interface SchoolItem {
@@ -90,14 +100,114 @@ export default function App() {
   const [copiedCode, setCopiedCode] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<"form" | "guide" | "code">("form");
 
+  // Admin authentication states and handlers
+  const [adminEmail, setAdminEmail] = useState<string>(() => {
+    return localStorage.getItem("edu_admin_email") || "";
+  });
+  const [inputEmail, setInputEmail] = useState<string>("");
+  const [inputPassword, setInputPassword] = useState<string>("");
+  const [loginError, setLoginError] = useState<string | null>(null);
+
+  const isAdmin = adminEmail === "nhhai@dongthap.edu.vn";
+
+  const handleAdminLogin = (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginError(null);
+    if (inputEmail.trim().toLowerCase() === "nhhai@dongthap.edu.vn") {
+      setAdminEmail("nhhai@dongthap.edu.vn");
+      localStorage.setItem("edu_admin_email", "nhhai@dongthap.edu.vn");
+      setInputEmail("");
+      setInputPassword("");
+    } else {
+      setLoginError("Tài khoản chưa được phân quyền Quản trị. Vui lòng nhập đúng Gmail nhhai@dongthap.edu.vn!");
+    }
+  };
+
+  const handleAdminLogout = () => {
+    if (confirm("Bạn có chắc chắn muốn đăng xuất chế độ Quản trị viên không?")) {
+      setAdminEmail("");
+      localStorage.removeItem("edu_admin_email");
+    }
+  };
+
   // Save config changes to localStorage
   useEffect(() => {
     localStorage.setItem("edu_gas_url", gasUrl);
   }, [gasUrl]);
 
+  // Real-time Firestore synchronization for reports
   useEffect(() => {
-    localStorage.setItem("edu_submitted_reports", JSON.stringify(submittedReports));
-  }, [submittedReports]);
+    const q = query(collection(db, "reports"), orderBy("createdAt", "desc"));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const reportsList: ReportItem[] = [];
+      snapshot.forEach((docRef) => {
+        const data = docRef.data();
+        reportsList.push({
+          id: docRef.id,
+          timestamp: data.timestamp || "",
+          xa_phuong: data.xa_phuong || "",
+          ten_truong: data.ten_truong || "",
+          ho_ten_gv: data.ho_ten_gv || "",
+          tien_si: data.tien_si || "",
+          thac_si: data.thac_si || "",
+          dai_hoc: data.dai_hoc || "",
+          isLive: data.isLive !== false
+        });
+      });
+      setSubmittedReports(reportsList);
+      localStorage.setItem("edu_submitted_reports", JSON.stringify(reportsList));
+    }, (error) => {
+      console.error("Firestore loading reports error:", error);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Real-time Firestore synchronization for schools
+  useEffect(() => {
+    const unsubscribe = onSnapshot(collection(db, "schools"), (snapshot) => {
+      if (!snapshot.empty) {
+        const schoolsList: SchoolItem[] = [];
+        snapshot.forEach((docRef) => {
+          const data = docRef.data();
+          schoolsList.push({
+            xa_phuong: data.xa_phuong || "",
+            ten_truong: data.ten_truong || "",
+            cap_bao_cao: data.cap_bao_cao || ""
+          });
+        });
+        setSchools(schoolsList);
+        localStorage.setItem("edu_cached_schools", JSON.stringify(schoolsList));
+      }
+    }, (error) => {
+      console.error("Firestore loading schools error:", error);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const [isSeedingSchools, setIsSeedingSchools] = useState<boolean>(false);
+  const seedSchoolsToFirebase = async () => {
+    setIsSeedingSchools(true);
+    setSubmitStatus({ type: null, message: "" });
+    try {
+      const batchPromises = DEFAULT_SCHOOLS.map((school) => {
+        return addDoc(collection(db, "schools"), school);
+      });
+      await Promise.all(batchPromises);
+      setSubmitStatus({
+        type: "success",
+        message: "🎉 Đã khởi tạo và đồng bộ danh bạ 11 trường học mẫu lên Firebase Firestore thành công!"
+      });
+    } catch (err: any) {
+      console.error("Error seeding schools collection:", err);
+      setSubmitStatus({
+        type: "error",
+        message: `Lỗi đồng bộ danh mục: ${err.message || err}`
+      });
+    } finally {
+      setIsSeedingSchools(false);
+    }
+  };
+
 
   // Load live schools data from Google Apps Script doGet(e)
   const fetchLiveSchools = async (silent = false) => {
@@ -228,69 +338,51 @@ export default function App() {
     // We can simulate Vietnamese formatting or ISO
     const localTimeString = formatter.format(new Date());
 
-    if (!gasUrl) {
-      // Treat as stored in local backup first
-      setTimeout(() => {
-        const newReport: ReportItem = {
-          id: Date.now().toString(),
-          timestamp: localTimeString,
-          ...payload,
-          isLive: false
-        };
-        setSubmittedReports((prev) => [newReport, ...prev]);
-        setIsSubmitting(false);
-        setSubmitStatus({
-          type: "success",
-          message: "🎉 Đã ghi nhận báo cáo vào bộ nhớ tạm thời! Vui lòng cài đặt URL Google Apps Script ở mục cấu hình phía dưới để gửi trực tiếp về Google Sheets."
-        });
-        handleResetForm();
-        window.scrollTo({ top: 0, behavior: "smooth" });
-      }, 600);
-      return;
-    }
-
     try {
-      // Prepare URL-encoded form parameters or raw text to bypass complex structures
-      // As requested: Submit using mode 'no-cors' to absolutely avoid CORS issues!
-      const searchParams = new URLSearchParams();
-      searchParams.append("xa_phuong", payload.xa_phuong);
-      searchParams.append("ten_truong", payload.ten_truong);
-      searchParams.append("ho_ten_gv", payload.ho_ten_gv);
-      searchParams.append("tien_si", payload.tien_si);
-      searchParams.append("thac_si", payload.thac_si);
-      searchParams.append("dai_hoc", payload.dai_hoc);
-
-      // Fetch using mode: 'no-cors' as explicitly requested!
-      // We will do a POST fetch using no-cors. Since it is 'no-cors', we cannot read the response body.
-      // But the browser will deliver it safely to Google server.
-      await fetch(gasUrl, {
-        method: "POST",
-        mode: "no-cors",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-        body: searchParams.toString(),
+      // 1. Persist directly to Firebase Cloud Firestore reports collection
+      await addDoc(collection(db, "reports"), {
+        ...payload,
+        timestamp: localTimeString,
+        createdAt: serverTimestamp(),
+        isLive: true
       });
 
-      // Add to client logs for immediate screen verification and trace
-      const targetReport: ReportItem = {
-        id: Date.now().toString(),
-        timestamp: localTimeString,
-        ...payload,
-        isLive: true
-      };
+      // 2. Secondary fallback submission to Google Sheets if Apps Script URL is defined
+      if (gasUrl) {
+        try {
+          const searchParams = new URLSearchParams();
+          searchParams.append("xa_phuong", payload.xa_phuong);
+          searchParams.append("ten_truong", payload.ten_truong);
+          searchParams.append("ho_ten_gv", payload.ho_ten_gv);
+          searchParams.append("tien_si", payload.tien_si);
+          searchParams.append("thac_si", payload.thac_si);
+          searchParams.append("dai_hoc", payload.dai_hoc);
 
-      setSubmittedReports((prev) => [targetReport, ...prev]);
+          await fetch(gasUrl, {
+            method: "POST",
+            mode: "no-cors",
+            headers: {
+              "Content-Type": "application/x-www-form-urlencoded",
+            },
+            body: searchParams.toString(),
+          });
+        } catch (gasErr: any) {
+          console.warn("GAS forwarding failed:", gasErr);
+        }
+      }
+
       setIsSubmitting(false);
-      
       setSubmitStatus({
         type: "success",
-        message: "🎉 Gửi báo cáo thành công! Số liệu giáo viên đã được truyền tải về Google Sheets qua cơ chế 'no-cors' an toàn."
+        message: gasUrl 
+          ? "🎉 Gửi báo cáo thành công! Bản ghi đã được lưu trữ vĩnh viễn trên Firebase Firestore và đồng bộ tới Google Sheets."
+          : "🎉 Gửi báo cáo thành công! Bản ghi đã được đồng bộ trực tiếp lên Cloud Firestore an toàn."
       });
-      
       handleResetForm();
-    } catch (err: any) {
-      console.error("Fetch Error:", err);
+    } catch (fbErr: any) {
+      console.error("Firebase submit error:", fbErr);
+      
+      // Fallback local memory state
       const targetReport: ReportItem = {
         id: Date.now().toString(),
         timestamp: localTimeString,
@@ -298,11 +390,12 @@ export default function App() {
         isLive: false
       };
       setSubmittedReports((prev) => [targetReport, ...prev]);
+      
+      setIsSubmitting(false);
       setSubmitStatus({
         type: "error",
-        message: `Lỗi truyền tải: ${err.message || err}. Dữ liệu giáo viên đã được tạm lưu trong danh sách bên phải.`
+        message: `Lỗi kết nối Firebase: ${fbErr.message || fbErr}. Bản ghi của bạn đã tạm thời lưu trữ offline.`
       });
-      setIsSubmitting(false);
     }
   };
 
@@ -432,14 +525,89 @@ function doPost(e) {
   };
 
   // Remove individual client-submitted simulation item
-  const handleClearReport = (id: string) => {
-    setSubmittedReports((prev) => prev.filter((r) => r.id !== id));
+  const handleClearReport = async (id: string) => {
+    // Check if it's a Firestore generated ID (alphanumeric hash, not a timestamp number)
+    const isFirestoreId = id.length > 10 && isNaN(Number(id));
+
+    if (isFirestoreId) {
+      if (!confirm("Bạn có chắc chắn muốn xoá báo cáo giáo dục này khỏi cơ sở dữ liệu Firebase Cloud Firestore không?")) {
+        return;
+      }
+      try {
+        await deleteDoc(doc(db, "reports", id));
+        setSubmitStatus({
+          type: "success",
+          message: "🎉 Đã xóa bản ghi thành công khỏi Firebase Cloud Firestore!"
+        });
+      } catch (err: any) {
+        console.error("Error deleting from Firestore:", err);
+        setSubmitStatus({
+          type: "error",
+          message: `Lỗi xóa dữ liệu: ${err.message || err}`
+        });
+      }
+    } else {
+      setSubmittedReports((prev) => prev.filter((r) => r.id !== id));
+    }
   };
 
   // Reset entire reports simulator log back to empty
   const handleClearAllReports = () => {
-    if (confirm("Bạn có chắc chắn muốn xóa tất cả lịch sử báo cáo giả lập hiển thị trên giao diện này không?")) {
+    if (confirm("Bạn có chắc chắn muốn xóa tất cả lịch sử báo cáo hiển thị trên giao diện này không? (Lưu ý: Thao tác này chỉ xóa hiển thị tạm thời nếu có kết nối Firebase)")) {
       setSubmittedReports([]);
+    }
+  };
+
+  // Export reports to standard Excel (.xlsx) file with Vietnamese labels
+  const handleExportExcel = () => {
+    if (submittedReports.length === 0) {
+      alert("Không có dữ liệu báo cáo nào để xuất!");
+      return;
+    }
+
+    try {
+      // Map data to Vietnamese columns
+      const excelData = submittedReports.map((report, index) => ({
+        "STT": index + 1,
+        "Thời gian báo cáo": report.timestamp,
+        "Xã / Phường": report.xa_phuong,
+        "Tên trường học": report.ten_truong,
+        "Họ và tên giáo viên": report.ho_ten_gv,
+        "Tiến sĩ": report.tien_si ? "X" : "",
+        "Thạc sĩ": report.thac_si ? "X" : "",
+        "Đại học": report.dai_hoc ? "X" : "",
+        "Trạng thái đính kèm": report.isLive ? "Đồng bộ đám mây" : "Lưu trữ offline"
+      }));
+
+      // Create a worksheet
+      const worksheet = XLSX.utils.json_to_sheet(excelData);
+
+      // Define standard column formatting widths
+      worksheet["!cols"] = [
+        { wch: 6 },   // STT
+        { wch: 22 },  // Thời gian báo cáo
+        { wch: 18 },  // Xã / Phường
+        { wch: 28 },  // Tên trường học
+        { wch: 25 },  // Họ và tên giáo viên
+        { wch: 10 },  // Tiến sĩ
+        { wch: 10 },  // Thạc sĩ
+        { wch: 10 },  // Đại học
+        { wch: 18 }   // Trạng thái đính kèm
+      ];
+
+      // Create workbook and append worksheet
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, "BaoCaoGiaoVien");
+
+      // Generate filename based on date
+      const currentDate = new Date().toLocaleDateString("vi-VN").replace(/\//g, "-");
+      const fileName = `Bao_cao_Trinh_do_Giao_vien_${currentDate}.xlsx`;
+
+      // Export file
+      XLSX.writeFile(workbook, fileName);
+    } catch (err: any) {
+      console.error("Export Excel Error:", err);
+      alert(`Đã xảy ra lỗi khi tạo tệp Excel: ${err.message || err}`);
     }
   };
 
@@ -477,13 +645,37 @@ function doPost(e) {
 
             {/* Connection Status Indicator */}
             <div className="flex flex-wrap items-center gap-2 z-10">
+              {isAdmin ? (
+                <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold tracking-wide bg-amber-500 text-white border border-amber-600 shadow-sm animate-fade-in">
+                  <Shield className="w-3.5 h-3.5 text-amber-150" />
+                  Quản trị viên: nhhai@dongthap.edu.vn
+                  <button 
+                    onClick={handleAdminLogout}
+                    className="ml-1.5 text-[10px] bg-red-600 hover:bg-red-700 active:bg-red-800 text-white font-bold px-1.5 py-0.5 rounded transition-all cursor-pointer flex items-center gap-0.5 border border-red-500"
+                    title="Đăng xuất khỏi Chức năng Quản trị"
+                  >
+                    <LogOut className="w-2.5 h-2.5" /> Thoát
+                  </button>
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold tracking-wide bg-slate-100 text-slate-600 border border-slate-200">
+                  <User className="w-3.5 h-3.5 text-slate-400" />
+                  Độc giả công khai
+                </span>
+              )}
+
+              <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold tracking-wide bg-indigo-50 text-indigo-700 border border-indigo-200">
+                <span className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse" />
+                Firebase: Active (nhaplieudemo)
+              </span>
+              
               <span className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold tracking-wide ${
                 gasUrl 
                   ? "bg-emerald-50 text-emerald-700 border border-emerald-200" 
-                  : "bg-amber-50 text-amber-700 border border-amber-200 font-medium"
+                  : "bg-teal-50 text-teal-700 border border-teal-200 font-medium"
               }`}>
-                <span className={`w-2 h-2 rounded-full ${gasUrl ? "bg-emerald-500 animate-pulse" : "bg-amber-500"}`} />
-                {gasUrl ? "Đã liên kết Google Sheets" : "Lưu trữ cục bộ (Chờ liên kết)"}
+                <span className={`w-2 h-2 rounded-full ${gasUrl ? "bg-emerald-500 animate-pulse" : "bg-teal-500"}`} />
+                {gasUrl ? "Google Sheets: Đồng bộ" : "Google Sheets: Chưa cấu hình"}
               </span>
             </div>
           </div>
@@ -781,107 +973,234 @@ function doPost(e) {
             {/* Simulated Database Viewer (Right Section) */}
             <div className="lg:col-span-5 space-y-6">
               
-              {/* Box Info on current DB stats */}
-              <div className="bg-gradient-to-br from-indigo-950 to-indigo-900 rounded-2xl shadow-sm text-white p-6 relative overflow-hidden">
-                <div className="absolute right-0 top-0 bottom-0 pointer-events-none opacity-10 flex items-center pr-4">
-                  <Database className="w-32 h-32" />
-                </div>
-                <div className="relative z-10">
-                  <span className="text-xs font-semibold text-emerald-400 uppercase tracking-widest block mb-1">
-                    Cơ sở dữ liệu biểu mẫu
-                  </span>
-                  <h3 className="text-xl font-bold font-display">Lịch sử Giao dịch Báo cáo</h3>
-                  <p className="text-xs text-indigo-200 mt-2 leading-relaxed">
-                    Theo dõi thời gian thực các báo cáo được thực thi. Số liệu báo cáo sẽ được hiển thị đồng bộ dưới đây để quản trị viên đối soát dễ dàng.
-                  </p>
-                  
-                  <div className="grid grid-cols-2 gap-4 mt-4 pt-4 border-t border-indigo-800/60">
-                    <div>
-                      <span className="text-[10px] text-indigo-300 block">Số bản ghi cục bộ</span>
-                      <span className="text-2xl font-bold font-display text-emerald-400">{submittedReports.length}</span>
+              {isAdmin ? (
+                <>
+                  {/* Box Info on current DB stats */}
+                  <div className="bg-gradient-to-br from-indigo-950 to-indigo-900 rounded-2xl shadow-sm text-white p-6 relative overflow-hidden">
+                    <div className="absolute right-0 top-0 bottom-0 pointer-events-none opacity-10 flex items-center pr-4">
+                      <Database className="w-32 h-32" />
                     </div>
-                    <div>
-                      <span className="text-[10px] text-indigo-300 block">Trạng thái đồng bộ</span>
-                      <span className="text-sm font-bold text-white flex items-center gap-1.5 mt-1 font-display">
-                        <span className={`w-2 h-2 rounded-full ${gasUrl ? "bg-emerald-400 animate-pulse" : "bg-amber-400"}`} />
-                        {gasUrl ? "Đồng bộ trực tiếp" : "Lưu trữ cục bộ"}
+                    <div className="relative z-10">
+                      <span className="text-xs font-semibold text-emerald-400 uppercase tracking-widest block mb-1">
+                        Cơ sở dữ liệu biểu mẫu
                       </span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Data Table of reports */}
-              <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6">
-                <div className="flex items-center justify-between pb-4 border-b border-slate-100 mb-4">
-                  <h4 className="font-bold text-sm text-slate-800 flex items-center gap-1.5 font-display">
-                    <Database className="w-4 h-4 text-indigo-600" />
-                    Báo cáo vừa gửi ({submittedReports.length})
-                  </h4>
-                  {submittedReports.length > 0 && (
-                    <button
-                      onClick={handleClearAllReports}
-                      className="text-xs text-red-500 hover:text-red-700 font-semibold cursor-pointer hover:underline"
-                    >
-                      Xóa bộ nhớ đệm
-                    </button>
-                  )}
-                </div>
-
-                <div className="max-h-80 overflow-y-auto space-y-3 pr-1">
-                  {submittedReports.length === 0 ? (
-                    <div className="text-center py-8 text-slate-400">
-                      <Info className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                      <p className="text-xs">Chưa có giao dịch báo cáo nào được ghi nhận.</p>
-                      <p className="text-[11px] mt-1 text-slate-400">Hãy điền form mẫu bên trái để trải nghiệm.</p>
-                    </div>
-                  ) : (
-                    submittedReports.map((report) => (
-                      <div 
-                        key={report.id} 
-                        className="p-3 bg-slate-50 rounded-xl border border-slate-100 relative group text-xs hover:shadow-sm transition-all"
-                      >
-                        <button
-                          onClick={() => handleClearReport(report.id)}
-                          className="absolute right-2 top-2 text-slate-400 hover:text-red-600 transition-colors cursor-pointer text-xs p-1"
-                          title="Xóa dòng log"
-                        >
-                          ✕
-                        </button>
-                        
-                        <div className="flex items-center justify-between text-[10px] text-slate-400 font-mono mb-1.5">
-                          <span>⏱ {report.timestamp}</span>
-                          <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
-                            report.isLive ? "bg-emerald-100 text-emerald-850 border border-emerald-200" : "bg-amber-100 text-amber-850 border border-amber-200"
-                          }`}>
-                            {report.isLive ? "✓ LIVE TO SHEETS" : "LOCAL BACKUP"}
-                          </span>
+                      <h3 className="text-xl font-bold font-display">Lịch sử Giao dịch Báo cáo</h3>
+                      <p className="text-xs text-indigo-200 mt-2 leading-relaxed">
+                        Theo dõi thời gian thực các báo cáo được thực thi. Số liệu báo cáo sẽ được hiển thị đồng bộ dưới đây để quản trị viên đối soát dễ dàng.
+                      </p>
+                      
+                      <div className="grid grid-cols-2 gap-4 mt-4 pt-4 border-t border-indigo-800/60 font-display">
+                        <div>
+                          <span className="text-[10px] text-indigo-300 block">Số bản ghi Firebase</span>
+                          <span className="text-2xl font-bold font-display text-emerald-400">{submittedReports.length}</span>
                         </div>
-
-                        <p className="font-bold text-slate-900 mb-1">
-                          GV: {report.ho_ten_gv}
-                        </p>
-
-                        <p className="text-slate-600 flex items-center gap-1 mb-2">
-                          🏫 {report.ten_truong} ({report.xa_phuong})
-                        </p>
-
-                        <div className="flex gap-2.5">
-                          <span className={`px-2 py-0.5 rounded font-medium text-[10px] ${report.tien_si ? "bg-indigo-100 text-indigo-700" : "bg-slate-200/50 text-slate-400"}`}>
-                            Tiến sĩ: {report.tien_si || "—"}
-                          </span>
-                          <span className={`px-2 py-0.5 rounded font-medium text-[10px] ${report.thac_si ? "bg-pink-100 text-pink-700" : "bg-slate-200/50 text-slate-400"}`}>
-                            Thạc sĩ: {report.thac_si || "—"}
-                          </span>
-                          <span className={`px-2 py-0.5 rounded font-medium text-[10px] ${report.dai_hoc ? "bg-teal-100 text-teal-700" : "bg-slate-200/50 text-slate-400"}`}>
-                            Đại học: {report.dai_hoc || "—"}
+                        <div>
+                          <span className="text-[10px] text-indigo-300 block">Trạng thái dữ liệu</span>
+                          <span className="text-sm font-bold text-white flex items-center gap-1.5 mt-1">
+                            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                            Real-time Live Cloud
                           </span>
                         </div>
                       </div>
-                    ))
-                  )}
+
+                      <div className="mt-4 pt-4 border-t border-indigo-800/60 flex flex-col gap-2">
+                        <span className="text-[10px] text-indigo-300 block">Khởi tạo danh sách Trường:</span>
+                        <button
+                          type="button"
+                          onClick={seedSchoolsToFirebase}
+                          disabled={isSeedingSchools}
+                          className="w-full text-center text-[11px] bg-indigo-850/80 hover:bg-indigo-800 hover:scale-[1.015] border border-indigo-700/50 text-indigo-100 py-2 px-3 rounded-lg font-semibold transition-all cursor-pointer disabled:opacity-50"
+                        >
+                          {isSeedingSchools ? (
+                            <span className="flex items-center justify-center gap-1.5">
+                              <RefreshCw className="w-3 h-3 animate-spin" />
+                              Đang tải lên dữ liệu...
+                            </span>
+                          ) : (
+                            "🚀 Khởi tạo 11 trường mẫu học lên Cloud"
+                          )}
+                        </button>
+                      </div>
+
+                      {submittedReports.length > 0 && (
+                        <div className="mt-3 pt-3 border-t border-indigo-800/60 flex flex-col gap-2">
+                          <span className="text-[10px] text-indigo-300 block">Xuất dữ liệu:</span>
+                          <button
+                            type="button"
+                            onClick={handleExportExcel}
+                            className="w-full text-center text-xs bg-emerald-600 hover:bg-emerald-700 hover:scale-[1.015] text-white py-2.5 px-3 rounded-lg font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5 shadow"
+                          >
+                            <FileSpreadsheet className="w-4 h-4 text-emerald-100" />
+                            Tải Xuất Báo Cáo Excel (.xlsx)
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Data Table of reports */}
+                  <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6">
+                    <div className="flex items-center justify-between pb-4 border-b border-slate-100 mb-4">
+                      <h4 className="font-bold text-sm text-slate-800 flex items-center gap-1.5 font-display">
+                        <Database className="w-4 h-4 text-indigo-600" />
+                        Báo cáo vừa gửi ({submittedReports.length})
+                      </h4>
+                      {submittedReports.length > 0 && (
+                        <div className="flex items-center gap-2.5">
+                          <button
+                            onClick={handleExportExcel}
+                            className="text-xs bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 font-semibold px-2.5 py-1.5 rounded-lg flex items-center gap-1 cursor-pointer transition-colors"
+                          >
+                            <FileSpreadsheet className="w-3.5 h-3.5" />
+                            Xuất Excel
+                          </button>
+                          <button
+                            onClick={handleClearAllReports}
+                            className="text-xs text-red-500 hover:text-red-700 font-semibold cursor-pointer hover:underline"
+                          >
+                            Xóa bộ nhớ đệm
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="max-h-85 overflow-y-auto space-y-3 pr-1">
+                      {submittedReports.length === 0 ? (
+                        <div className="text-center py-8 text-slate-400">
+                          <Info className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                          <p className="text-xs">Chưa có giao dịch báo cáo nào được ghi nhận.</p>
+                          <p className="text-[11px] mt-1 text-slate-400">Hãy điền form mẫu bên trái để trải nghiệm.</p>
+                        </div>
+                      ) : (
+                        submittedReports.map((report) => (
+                          <div 
+                            key={report.id} 
+                            className="p-3 bg-slate-50 rounded-xl border border-slate-100 relative group text-xs hover:shadow-sm transition-all animate-scale-up"
+                          >
+                            <button
+                              onClick={() => handleClearReport(report.id)}
+                              className="absolute right-2 top-2 text-slate-400 hover:text-red-600 transition-colors cursor-pointer text-xs p-1"
+                              title="Xóa dòng log"
+                            >
+                              ✕
+                            </button>
+                            
+                            <div className="flex items-center justify-between text-[10px] text-slate-400 font-mono mb-1.5">
+                              <span>⏱ {report.timestamp}</span>
+                              <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                                report.isLive ? "bg-emerald-100 text-emerald-850 border border-emerald-200" : "bg-amber-100 text-amber-850 border border-amber-200"
+                              }`}>
+                                {report.isLive ? "✓ LIVE TO SHEETS" : "LOCAL BACKUP"}
+                              </span>
+                            </div>
+
+                            <p className="font-bold text-slate-900 mb-1">
+                              GV: {report.ho_ten_gv}
+                            </p>
+
+                            <p className="text-slate-600 flex items-center gap-1 mb-2">
+                              🏫 {report.ten_truong} ({report.xa_phuong})
+                            </p>
+
+                            <div className="flex gap-2.5">
+                              <span className={`px-2 py-0.5 rounded font-medium text-[10px] ${report.tien_si ? "bg-indigo-100 text-indigo-700" : "bg-slate-200/50 text-slate-400"}`}>
+                                Tiến sĩ: {report.tien_si || "—"}
+                              </span>
+                              <span className={`px-2 py-0.5 rounded font-medium text-[10px] ${report.thac_si ? "bg-pink-100 text-pink-700" : "bg-slate-200/50 text-slate-400"}`}>
+                                Thạc sĩ: {report.thac_si || "—"}
+                              </span>
+                              <span className={`px-2 py-0.5 rounded font-medium text-[10px] ${report.dai_hoc ? "bg-teal-100 text-teal-700" : "bg-slate-200/50 text-slate-400"}`}>
+                                Đại học: {report.dai_hoc || "—"}
+                              </span>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="bg-white rounded-2xl shadow-md border-2 border-indigo-150 p-6 sm:p-8 space-y-6 transition-all duration-300">
+                  <div className="text-center space-y-3 pb-4 border-b border-slate-100">
+                    <div className="mx-auto w-12 h-12 bg-amber-50 text-amber-600 rounded-2xl flex items-center justify-center shadow-inner">
+                      <Lock className="w-5 h-5 text-amber-600" />
+                    </div>
+                    <div className="space-y-1">
+                      <h3 className="text-base font-bold font-display text-slate-900">Xác thực Quyền Quản trị viên</h3>
+                      <p className="text-xs text-slate-500">Mở khoá danh sách dữ liệu & Tải phái biểu mẫu Excel</p>
+                    </div>
+                  </div>
+
+                  <form onSubmit={handleAdminLogin} className="space-y-4">
+                    {loginError && (
+                      <div className="p-3 bg-red-50 border border-red-150 text-red-700 rounded-xl text-xs font-medium flex items-start gap-2">
+                        <AlertCircle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
+                        <span>{loginError}</span>
+                      </div>
+                    )}
+
+                    <div className="space-y-1.5">
+                      <label className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider">
+                        Tài khoản Gmail quản trị
+                      </label>
+                      <div className="relative">
+                        <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3.5 text-slate-400">
+                          <Mail className="w-4 h-4" />
+                        </div>
+                        <input
+                          type="email"
+                          required
+                          value={inputEmail}
+                          onChange={(e) => setInputEmail(e.target.value)}
+                          placeholder="Ví dụ: nhhai@dongthap.edu.vn"
+                          className="w-full bg-slate-50 border border-slate-200 focus:border-indigo-500 focus:bg-white focus:outline-none focus:ring-1 focus:ring-indigo-500 rounded-xl pl-10 pr-4 py-2.5 text-xs text-slate-850 transition-all font-medium"
+                        />
+                      </div>
+                      <p className="text-[10px] text-slate-400">Tài khoản được phân quyền: <strong className="text-indigo-600 font-semibold select-all">nhhai@dongthap.edu.vn</strong></p>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider">
+                        Mật khẩu ứng dụng Gmail
+                      </label>
+                      <div className="relative">
+                        <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3.5 text-slate-400">
+                          <Lock className="w-4 h-4" />
+                        </div>
+                        <input
+                          type="password"
+                          required
+                          value={inputPassword}
+                          onChange={(e) => setInputPassword(e.target.value)}
+                          placeholder="Nhập mật khẩu bất kỳ (ví dụ: gamil123)"
+                          className="w-full bg-slate-50 border border-slate-200 focus:border-indigo-500 focus:bg-white focus:outline-none focus:ring-1 focus:ring-indigo-500 rounded-xl pl-10 pr-4 py-2.5 text-xs text-slate-850 transition-all font-medium"
+                        />
+                      </div>
+                    </div>
+
+                    <button
+                      type="submit"
+                      className="w-full bg-indigo-600 hover:bg-indigo-700 hover:scale-[1.01] active:scale-[0.99] text-white font-bold py-3 px-4 rounded-xl shadow-sm hover:shadow transition-all flex items-center justify-center gap-2 cursor-pointer text-xs"
+                    >
+                      <LogIn className="w-4 h-4 text-white/95" />
+                      Xác thực & Mở khoá dữ liệu
+                    </button>
+                  </form>
+
+                  <div className="bg-slate-50 p-4 rounded-xl border border-slate-100 text-slate-605 space-y-2.5 text-xs">
+                    <span className="font-bold text-slate-850 flex items-center gap-1.5">
+                      <Shield className="w-3.5 h-3.5 text-indigo-650" />
+                      Quyền lợi bảo mật của Quản trị viên:
+                    </span>
+                    <ul className="space-y-1 text-[11px] list-disc pl-4 text-slate-500">
+                      <li>Truy cập cơ sở dữ liệu thời gian thực của Cloud Firestore.</li>
+                      <li>Xem đầy đủ danh sách phản hồi khảo sát giáo viên toàn địa giới.</li>
+                      <li>Mở khóa chức năng <strong>Tải Xuất tệp Excel (.xlsx)</strong> để tải về máy tính.</li>
+                      <li>Khởi tạo/xóa các bản ghi để bảo đảm tính thống nhất dữ liệu.</li>
+                    </ul>
+                  </div>
                 </div>
-              </div>
+              )}
 
             </div>
 

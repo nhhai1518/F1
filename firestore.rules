@@ -1,0 +1,64 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // 1. Global safety net - Deny all unauthorized access
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Hardened helper validations
+    function isValidId(id) { 
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); 
+    }
+    
+    function incoming() { 
+      return request.resource.data; 
+    }
+    
+    function existing() { 
+      return resource.data; 
+    }
+
+    // 2. Rules for 'reports' collection (Submission History)
+    match /reports/{reportId} {
+      // Allow retrieval to list teacher reports in real-time
+      allow read: if true; 
+      
+      // Strict key and boundary safety on reporting creation
+      allow create: if (
+        isValidId(reportId) &&
+        incoming().keys().hasAll(['xa_phuong', 'ten_truong', 'ho_ten_gv', 'tien_si', 'thac_si', 'dai_hoc', 'timestamp', 'createdAt', 'isLive']) &&
+        incoming().keys().size() == 9 &&
+        incoming().xa_phuong is string && incoming().xa_phuong.size() <= 200 &&
+        incoming().ten_truong is string && incoming().ten_truong.size() <= 300 &&
+        incoming().ho_ten_gv is string && incoming().ho_ten_gv.size() <= 150 &&
+        incoming().tien_si is string && incoming().tien_si.size() <= 5 &&
+        incoming().thac_si is string && incoming().thac_si.size() <= 5 &&
+        incoming().dai_hoc is string && incoming().dai_hoc.size() <= 5 &&
+        incoming().timestamp is string && incoming().timestamp.size() <= 50 &&
+        incoming().isLive == true &&
+        incoming().createdAt == request.time
+      );
+      
+      // Allow deletion of single report listings
+      allow delete: if isValidId(reportId);
+    }
+
+    // 3. Rules for 'schools' collection (Master Catalog Database)
+    match /schools/{schoolId} {
+      // Anyone can load the available school catalogs for registration dropdowns
+      allow read: if true;
+      
+      // Strict verification when syncing master directories
+      allow create: if (
+        isValidId(schoolId) &&
+        incoming().keys().hasAll(['xa_phuong', 'ten_truong', 'cap_bao_cao']) &&
+        incoming().keys().size() == 3 &&
+        incoming().xa_phuong is string && incoming().xa_phuong.size() <= 200 &&
+        incoming().ten_truong is string && incoming().ten_truong.size() <= 300 &&
+        incoming().cap_bao_cao is string && incoming().cap_bao_cao.size() <= 100
+      );
+    }
+  }
+}

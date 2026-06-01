@@ -1,0 +1,41 @@
+{
+  "entities": {
+    "Report": {
+      "title": "Educational Report",
+      "description": "Report schema for educational qualification level of teachers",
+      "type": "object",
+      "properties": {
+        "xa_phuong": { "type": "string", "description": "Local Ward or Municipality" },
+        "ten_truong": { "type": "string", "description": "Educational facility name" },
+        "ho_ten_gv": { "type": "string", "description": "Teacher complete name" },
+        "tien_si": { "type": "string", "description": "Doctorate level achieved marker" },
+        "thac_si": { "type": "string", "description": "Master level achieved marker" },
+        "dai_hoc": { "type": "string", "description": "Bachelor level achieved marker" },
+        "timestamp": { "type": "string", "description": "Human readable Vietnamese time string" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Cloud document creation timestamp" }
+      },
+      "required": ["xa_phuong", "ten_truong", "ho_ten_gv"]
+    },
+    "School": {
+      "title": "School Item",
+      "description": "School database items schema info",
+      "type": "object",
+      "properties": {
+        "xa_phuong": { "type": "string", "description": "Location ward" },
+        "ten_truong": { "type": "string", "description": "Educational facility name" },
+        "cap_bao_cao": { "type": "string", "description": "Educational level index" }
+      },
+      "required": ["xa_phuong", "ten_truong", "cap_bao_cao"]
+    }
+  },
+  "firestore": {
+    "/reports/{reportId}": {
+      "schema": "Report",
+      "description": "User submitted educational qualification reports"
+    },
+    "/schools/{schoolId}": {
+      "schema": "School",
+      "description": "Master list containing local schools to load"
+    }
+  }
+}
